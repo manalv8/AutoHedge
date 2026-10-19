@@ -52,40 +52,71 @@ pip install -U autohedge
 ### Environment Variables
 
 ```bash
-# Jupiter API (token price & search tools)
-# Get a key at https://portal.jup.ag
-JUPITER_API_KEY=
-
-# OpenAI (experimental agents)
+# LLM provider (one is enough; AUTOHEDGE_MODEL picks the model)
 OPENAI_API_KEY=
 ANTHROPIC_API_KEY=
-WORKSPACE_DIR="agent_workspace"
+AUTOHEDGE_MODEL=gpt-4.1
 
-# Trading
-WALLET_PRIVATE_KEY=""
+# Trading mode: only "paper" is supported
+AUTOHEDGE_MODE=paper
+AUTOHEDGE_EQUITY_USD=10000
 ```
 
-See `.env.example` for a full reference.
+See `.env.example` for a full reference. Risk limits can be overridden
+with `AUTOHEDGE_<FIELD>` (e.g. `AUTOHEDGE_RISK_PER_TRADE_PCT=0.005`).
 
-### Basic Usage
+### Usage
 
-```python
-autohedge 
+```bash
+autohedge                                  # interactive REPL
+autohedge run "Analyze NVDA and SOL-USD"   # one task, prints a table
+autohedge evaluate                         # score past recommendations
 ```
 
 ---
 
 ## Architecture
 
-AutoHedge uses a multi-agent pipeline where each agent has a defined responsibility:
+LLMs only produce opinions as validated JSON. Market data, risk,
+sizing and orders are computed in code, in a fixed order:
 
 ```mermaid
 graph TD
-    A[Director Agent] --> B[Quant Agent]
-    B --> C[Risk Manager]
-    C --> D[Execution Agent]
-    D --> E[Trade Output]
+    T[Task] --> D[Director LLM: theses as JSON]
+    D --> M[Market data: Yahoo daily bars -> indicators in code]
+    M --> Q[Quant LLM: reads real snapshot, returns JSON]
+    Q --> R[Risk gate in code: veto or size]
+    R --> O[Paper limit order: entry / stop / take-profit]
+    R --> L[(outputs/ledger.jsonl)]
+    O --> L
+    L --> E[autohedge evaluate: win rate, expectancy vs buy and hold]
 ```
+
+### Risk gate (defaults)
+
+| Rule | Default |
+|---|---|
+| Minimum Director conviction | 0.60 |
+| Minimum Quant probability up | 0.55 |
+| Maximum annualized 20-day volatility | 120% |
+| Stop loss | 2 x ATR-14 below entry |
+| Take profit | 2R above entry |
+| Risk per trade | 1% of equity |
+| Maximum position | 5% of equity |
+
+Any failed rule vetoes the trade and is recorded with its reason.
+
+### Paper trading and evaluation
+
+Only paper trading is supported; any other `AUTOHEDGE_MODE` raises an
+error. `autohedge evaluate` replays each approved recommendation
+against later daily bars (limit fill, stop checked before
+take-profit, 0.30% round-trip fees) and compares it with buy and hold
+over the same window.
+
+**Before considering real capital:** at least 30 resolved
+recommendations, positive expectancy net of fees, average return above
+buy and hold, and no single loss larger than the per-trade risk.
 
 ---
 
