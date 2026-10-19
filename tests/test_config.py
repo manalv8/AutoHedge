@@ -61,4 +61,4 @@ def test_config_import_does_not_load_swarms():
         "import sys, autohedge.config; "
         "assert 'swarms' not in sys.modules"
     )
-    assert subprocess.run([sys.executable, "-c", code]).returncode == 0
+    assert subprocess.run([sys.executable, "-c", code], check=False).returncode == 0
