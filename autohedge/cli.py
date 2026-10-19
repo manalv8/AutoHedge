@@ -8,6 +8,7 @@ from pathlib import Path
 
 from rich.console import Console
 from rich.panel import Panel
+from rich.table import Table
 from rich.text import Text
 from rich.columns import Columns
 from rich import box
@@ -39,7 +40,8 @@ BANNER_ART = r"""
 """
 
 TIPS = [
-    "Enter a task prompt to run (e.g. 'Analyze NVDA for 50k allocation')",
+    "Enter a task prompt to run (e.g. 'Analyze NVDA and SOL-USD')",
+    "Paper trading only: every recommendation goes to outputs/ledger.jsonl",
     "Type 'quit' or 'exit' to leave",
     "Type 'help' or '?' for commands",
 ]
@@ -141,6 +143,78 @@ def _welcome() -> None:
     )
 
 
+def _run_task(task: str) -> list:
+    from autohedge import AutoHedge
+
+    return AutoHedge().run(task=task)
+
+
+def _fmt(value) -> str:
+    return "-" if value is None else f"{value:,.4g}"
+
+
+def render_recommendations(recs: list) -> None:
+    """Print recommendations as a table."""
+    table = Table(title="Paper recommendations", box=box.SIMPLE)
+    for col in (
+        "ticker",
+        "approved",
+        "reasons",
+        "entry",
+        "stop",
+        "tp",
+        "notional",
+    ):
+        table.add_column(col)
+    for r in recs:
+        o = r.order
+        table.add_row(
+            r.ticker or "-",
+            "[green]yes[/]" if r.approved else "[red]no[/]",
+            ", ".join(r.reasons) or "-",
+            _fmt(o and o.entry_price),
+            _fmt(o and o.stop_loss),
+            _fmt(o and o.take_profit),
+            _fmt(o and o.notional_usd),
+        )
+    console.print(table)
+
+
+def render_evaluation(outcomes: list, report) -> None:
+    """Print scored outcomes and the aggregate report."""
+    table = Table(title="Outcomes", box=box.SIMPLE)
+    for col in ("ticker", "status", "return %", "buy&hold %"):
+        table.add_column(col)
+    for o in outcomes:
+        table.add_row(
+            o.ticker,
+            o.status,
+            _fmt(o.return_pct),
+            _fmt(o.benchmark_return_pct),
+        )
+    console.print(table)
+
+    def pct(v):
+        return "-" if v is None else f"{v:.2f}%"
+
+    console.print(
+        f"Recommendations: {report.n_total} · "
+        f"Resolved: {report.n_resolved} · "
+        f"Pending: {report.n_pending} · "
+        f"Unfilled: {report.n_unfilled}"
+    )
+    console.print(
+        "Win rate: "
+        + (
+            "-"
+            if report.win_rate is None
+            else f"{report.win_rate * 100:.1f}%"
+        )
+        + f" · Expectancy (net of fees): {pct(report.expectancy_pct)}"
+        + f" · Buy & hold: {pct(report.avg_benchmark_return_pct)}"
+    )
+
+
 def run_repl() -> None:
     _welcome()
 
@@ -167,21 +241,10 @@ def run_repl() -> None:
             continue
 
         # Treat as task prompt
-        task = line
-        _append_recent(task)
+        _append_recent(line)
         try:
-            from autohedge import AutoHedge
-
-            system = AutoHedge()
             console.print("[dim]Running...[/]")
-            result = system.run(task=task)
-            console.print(
-                Panel(
-                    str(result)[:2000],
-                    title="Result",
-                    border_style="green",
-                )
-            )
+            render_recommendations(_run_task(line))
         except Exception as e:
             console.print(f"[red]Error: {e}[/]")
 
@@ -189,18 +252,18 @@ def run_repl() -> None:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="autohedge",
-        description="AutoHedge — interactive REPL for running research and hedging tasks.",
+        description="AutoHedge — paper-trading research agents.",
         epilog="""
 Commands (when running the REPL):
-  <task>     Run a task (e.g. 'Analyze NVDA for 50k allocation')
+  <task>     Run a task (e.g. 'Analyze NVDA and SOL-USD')
   help, ?, h Show in-REPL tips
   quit, exit, q  Exit the REPL
 
 Examples:
-  autohedge              Start the interactive REPL
-  autohedge help         Show this help
-  autohedge --help       Show this help
-  autohedge --version    Show version
+  autohedge                       Start the interactive REPL
+  autohedge run "Analyze NVDA"    Run one task and exit
+  autohedge evaluate              Score past recommendations
+  autohedge --version             Show version
 """,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -210,6 +273,17 @@ Examples:
         action="version",
         version=f"%(prog)s {VERSION}",
         help="Show program version and exit.",
+    )
+    sub = parser.add_subparsers(dest="command")
+    run_p = sub.add_parser("run", help="Run one task and exit.")
+    run_p.add_argument("task", help="Task prompt in natural language.")
+    eval_p = sub.add_parser(
+        "evaluate", help="Score recommendations in the ledger."
+    )
+    eval_p.add_argument(
+        "--ledger",
+        default="outputs/ledger.jsonl",
+        help="Path to ledger.jsonl (default: outputs/ledger.jsonl).",
     )
     return parser
 
@@ -221,8 +295,19 @@ def main() -> None:
     if len(sys.argv) == 2 and sys.argv[1].lower() == "help":
         parser.print_help()
         sys.exit(0)
-    parser.parse_args()  # exits on --help / --version
-    run_repl()
+    args = parser.parse_args()  # exits on --help / --version
+    if args.command == "run":
+        try:
+            render_recommendations(_run_task(args.task))
+        except Exception as e:
+            console.print(f"[red]Error: {e}[/]")
+            sys.exit(1)
+    elif args.command == "evaluate":
+        from autohedge.evaluation import evaluate_ledger
+
+        render_evaluation(*evaluate_ledger(Path(args.ledger)))
+    else:
+        run_repl()
     sys.exit(0)
 
 
