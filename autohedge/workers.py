@@ -18,14 +18,21 @@ def _system_suffix() -> str:
 def _make_agent(name: str, system_prompt: str) -> LLM:
     from swarms import Agent
 
-    agent = Agent(
-        agent_name=name,
-        system_prompt=system_prompt + _system_suffix(),
-        model_name=get_model_name(),
-        max_loops=1,
-        output_type="str",
-    )
-    return lambda text: str(agent.run(text))
+    def call(text: str) -> str:
+        # A fresh agent per call: swarms keeps conversation memory, so a
+        # reused agent would mix one ticker's reply into the next.
+        # output_type="final" returns only the model's last reply, not
+        # the prompt (whose example JSON would otherwise be parsed).
+        agent = Agent(
+            agent_name=name,
+            system_prompt=system_prompt + _system_suffix(),
+            model_name=get_model_name(),
+            max_loops=1,
+            output_type="final",
+        )
+        return str(agent.run(text))
+
+    return call
 
 
 def make_director() -> LLM:

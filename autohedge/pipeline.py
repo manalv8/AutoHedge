@@ -69,9 +69,14 @@ def _evaluate_thesis(
     rec["snapshot"] = snapshot
 
     try:
-        view = parse_llm_json(
-            quant(_quant_input(thesis, snapshot)), QuantView
+        reply = quant(_quant_input(thesis, snapshot))
+    except Exception as e:  # noqa: BLE001 - record, never lose batch
+        logger.error(f"{thesis.ticker}: quant call failed: {e}")
+        return Recommendation(
+            **rec, approved=False, reasons=["llm_error"]
         )
+    try:
+        view = parse_llm_json(reply, QuantView)
     except LLMOutputError as e:
         logger.warning(f"{thesis.ticker}: quant output: {e}")
         return Recommendation(
@@ -86,6 +91,52 @@ def _evaluate_thesis(
         reasons=decision.reasons,
         order=decision.order,
     )
+
+
+def _evaluate_theses(
+    theses: list[Thesis],
+    *,
+    quant: LLM,
+    fetch: BarsFetcher,
+    policy: RiskPolicy,
+    base: Callable[[], dict],
+) -> list[Recommendation]:
+    """One recommendation per thesis; one failure never stops the batch."""
+    recs = []
+    seen: set[str] = set()
+    for thesis in theses:
+        if thesis.ticker in seen:
+            # A second order would bypass the per-position cap.
+            recs.append(
+                Recommendation(
+                    **base(),
+                    ticker=thesis.ticker,
+                    thesis=thesis,
+                    approved=False,
+                    reasons=["duplicate_ticker"],
+                )
+            )
+            continue
+        seen.add(thesis.ticker)
+        try:
+            rec = _evaluate_thesis(
+                thesis,
+                quant=quant,
+                fetch=fetch,
+                policy=policy,
+                base=base(),
+            )
+        except Exception as e:  # noqa: BLE001 - record, never lose batch
+            logger.exception(f"{thesis.ticker}: unexpected error: {e}")
+            rec = Recommendation(
+                **base(),
+                ticker=thesis.ticker,
+                thesis=thesis,
+                approved=False,
+                reasons=["internal_error"],
+            )
+        recs.append(rec)
+    return recs
 
 
 def run_pipeline(
@@ -119,29 +170,32 @@ def run_pipeline(
             "mode": mode,
         }
 
-    try:
-        plan = parse_llm_json(director(task), DirectorOutput)
-    except LLMOutputError as e:
-        logger.warning(f"director output: {e}")
-        recs = [
+    def failed(reason: str) -> list[Recommendation]:
+        return [
             Recommendation(
-                **base(),
-                ticker=None,
-                approved=False,
-                reasons=["invalid_llm_output"],
+                **base(), ticker=None, approved=False, reasons=[reason]
             )
         ]
+
+    try:
+        reply = director(task)
+    except Exception as e:  # noqa: BLE001 - record, never lose batch
+        logger.error(f"director call failed: {e}")
+        recs = failed("llm_error")
     else:
-        recs = [
-            _evaluate_thesis(
-                thesis,
+        try:
+            plan = parse_llm_json(reply, DirectorOutput)
+        except LLMOutputError as e:
+            logger.warning(f"director output: {e}")
+            recs = failed("invalid_llm_output")
+        else:
+            recs = _evaluate_theses(
+                plan.theses,
                 quant=quant,
                 fetch=fetch,
                 policy=policy,
-                base=base(),
+                base=base,
             )
-            for thesis in plan.theses
-        ]
 
     append_recommendations(ledger_path, recs)
     return recs

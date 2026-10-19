@@ -45,27 +45,35 @@ def score_recommendation(
     rec: Recommendation, bars_after: list[Bar], today: date
 ) -> Outcome:
     """
-    Simulate a long limit order over its horizon (calendar days after
-    the recommendation date).
+    Simulate a long limit order over its horizon: calendar days after
+    the date of the bar the snapshot was taken from (the recommendation
+    date if there is no snapshot).
 
     The order fills on the first bar whose low reaches the entry. From
     that bar on, a bar touching the stop is a loss (checked first, so a
-    bar touching both counts as a loss), one touching the take-profit
-    is a win. If neither happens and the horizon is over, the trade
-    exits at the last close of the horizon.
+    bar touching both counts as a loss), exiting at the open if the bar
+    gapped through the stop. A bar touching the take-profit is a win;
+    on the fill bar this only counts if it opened at or below the entry,
+    since otherwise the high may have come before the fill. Without an
+    exit, the trade closes at the last close of the horizon.
+
+    The benchmark is buying at the entry and holding to the last close
+    of the horizon (or the latest bar while the horizon is open).
     """
     order = rec.order
-    start = rec.created_at.date()
+    start = (
+        rec.snapshot.as_of if rec.snapshot else rec.created_at.date()
+    )
     end = start + timedelta(days=order.expires_after_days)
     elapsed = today > end
     window = [b for b in bars_after if start < b.date <= end]
+    entry = order.entry_price
 
-    def outcome(status: Status, exit_price=None, bar=None) -> Outcome:
+    def outcome(status: Status, exit_price=None) -> Outcome:
         ret = bench = None
         if exit_price is not None:
-            entry = order.entry_price
             ret = (exit_price / entry - 1) * 100 - FEE_ROUND_TRIP_PCT
-            bench = (bar.close / entry - 1) * 100
+            bench = (window[-1].close / entry - 1) * 100
         return Outcome(
             rec_id=rec.id,
             ticker=order.ticker,
@@ -75,21 +83,21 @@ def score_recommendation(
         )
 
     fill = next(
-        (i for i, b in enumerate(window) if b.low <= order.entry_price),
-        None,
+        (i for i, b in enumerate(window) if b.low <= entry), None
     )
     if fill is None:
         return outcome("unfilled" if elapsed else "pending")
 
-    for bar in window[fill:]:
+    for i, bar in enumerate(window[fill:], start=fill):
         if bar.low <= order.stop_loss:
-            return outcome("loss", order.stop_loss, bar)
-        if bar.high >= order.take_profit:
-            return outcome("win", order.take_profit, bar)
+            return outcome("loss", min(bar.open, order.stop_loss))
+        tp_allowed = i > fill or bar.open <= entry
+        if tp_allowed and bar.high >= order.take_profit:
+            return outcome("win", max(bar.open, order.take_profit))
 
     if not elapsed:
         return outcome("pending")
-    return outcome("expired", window[-1].close, window[-1])
+    return outcome("expired", window[-1].close)
 
 
 def summarize(outcomes: list[Outcome]) -> EvalReport:

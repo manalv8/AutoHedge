@@ -1,4 +1,4 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -32,18 +32,39 @@ def order(horizon=5):
 REC = make_rec(approved=True, reasons=[], order=order())
 
 
-def bars(*specs):
-    """specs: (low, high, close) per day starting the day after CREATED."""
+def snapshot_on(day):
+    from autohedge.schemas import MarketSnapshot
+
+    return MarketSnapshot(
+        ticker="NVDA",
+        as_of=day,
+        last_close=100,
+        sma_20=100,
+        sma_50=100,
+        rsi_14=50,
+        atr_14=2.5,
+        vol_20d_annual=0.3,
+        return_20d_pct=0,
+        return_60d_pct=0,
+        high_52w=120,
+        low_52w=80,
+        n_bars=250,
+    )
+
+
+def bars(*specs, start=CREATED):
+    """specs: (low, high, close[, open]) per day after ``start``."""
     return [
         Bar(
-            date=CREATED + timedelta(days=i + 1),
-            open=c,
+            date=start + timedelta(days=i + 1),
+            open=s[3] if len(s) > 3 else s[2],
             high=h,
             low=lo,
             close=c,
             volume=1,
         )
-        for i, (lo, h, c) in enumerate(specs)
+        for i, s in enumerate(specs)
+        for lo, h, c in [s[:3]]
     ]
 
 
@@ -129,7 +150,7 @@ def test_evaluate_ledger_scores_only_approved(tmp_path):
     )
     outcomes, report = evaluate_ledger(
         path,
-        fetch=lambda t: bars((99, 111, 110)),
+        fetch=lambda t: bars((99, 111, 110, 100)),
         today=AFTER,
     )
     assert [o.rec_id for o in outcomes] == ["r1"]
@@ -145,3 +166,43 @@ def test_evaluate_ledger_survives_fetch_failure(tmp_path):
 
     outcomes, report = evaluate_ledger(path, fetch=fetch, today=AFTER)
     assert outcomes[0].status == "pending" and report.n_pending == 1
+
+
+def test_gap_below_stop_exits_at_open():
+    o = score(bars((99, 101, 100), (78, 82, 80, 80)))
+    assert o.status == "loss"
+    assert o.return_pct == pytest.approx(-20.3)
+
+
+def test_fill_bar_tp_ignored_when_opened_above_entry():
+    # opens at 112, trades down to fill at 100: high came before fill
+    o = score(bars((99, 112, 105, 112)))
+    assert o.status == "expired"
+
+
+def test_fill_bar_tp_counts_when_opened_at_or_below_entry():
+    o = score(bars((99, 111, 110, 100)))
+    assert o.status == "win"
+
+
+def test_benchmark_uses_horizon_end_close():
+    o = score(
+        bars((99, 111, 110, 100), (100, 101, 100), (90, 96, 92), (90, 95, 93),
+             (90, 95, 94))
+    )
+    assert o.status == "win"
+    assert o.benchmark_return_pct == pytest.approx(-6)
+
+
+def test_window_starts_after_snapshot_date():
+    # recommendation logged on 10-20 UTC, snapshot bar dated 10-19:
+    # the 10-20 session must be evaluated
+    rec = make_rec(
+        approved=True,
+        reasons=[],
+        order=order(),
+        created_at=datetime(2026, 10, 20, 1, 0, tzinfo=timezone.utc),
+        snapshot=snapshot_on(CREATED),
+    )
+    o = score_recommendation(rec, bars((94, 101, 96)), AFTER)
+    assert o.status == "loss"

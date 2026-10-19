@@ -95,3 +95,36 @@ def test_fetch_bars_drops_nan_rows(monkeypatch):
     bars = fetch_bars("X")
     assert len(bars) == 2
     assert bars[1].date == date(2026, 1, 3) and bars[1].close == 3.0
+
+
+def test_fetch_bars_drops_nonpositive_rows(monkeypatch):
+    idx = pd.to_datetime(["2026-01-01", "2026-01-02", "2026-01-03"])
+    df = pd.DataFrame(
+        {
+            "Open": [1.0, 2.0, 3.0],
+            "High": [1.5, 2.5, 3.5],
+            "Low": [0.5, 1.5, 2.5],
+            "Close": [1.0, 0.0, float("inf")],
+            "Volume": [10, float("nan"), 30],
+        },
+        index=idx,
+    )
+    monkeypatch.setattr(
+        market_data.yf, "Ticker", lambda t: _FakeTicker(df)
+    )
+    bars = fetch_bars("X")
+    assert [b.close for b in bars] == [1.0]
+
+
+def test_build_snapshot_rejects_nonpositive_close():
+    closes = [10.0] * 70
+    closes[-5] = 0.0
+    with pytest.raises(InsufficientHistoryError):
+        build_snapshot("BAD", _bars(closes))
+
+
+def test_snapshot_model_rejects_nan():
+    s = build_snapshot("T", _bars([10.0] * 60)).model_dump()
+    s["atr_14"] = float("nan")
+    with pytest.raises(ValueError):
+        market_data.MarketSnapshot(**s)

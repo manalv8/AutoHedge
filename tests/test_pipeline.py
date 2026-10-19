@@ -128,3 +128,51 @@ def test_pipeline_never_loads_signing_code():
         "assert 'swarms' not in sys.modules"
     )
     assert subprocess.run([sys.executable, "-c", code], check=False).returncode == 0
+
+
+def test_director_exception_recorded(tmp_path):
+    def director(t):
+        raise RuntimeError("rate limited")
+
+    recs = _run(tmp_path, director, quant=boom)
+    assert len(recs) == 1 and recs[0].reasons == ["llm_error"]
+    assert len(read_recommendations(tmp_path / "l.jsonl")) == 1
+
+
+def test_quant_exception_does_not_lose_batch(tmp_path):
+    calls = []
+
+    def quant(p):
+        calls.append(p)
+        if len(calls) == 1:
+            raise TimeoutError("timeout")
+        return QUANT_JSON
+
+    recs = _run(
+        tmp_path, lambda t: director_json("NVDA", "AMD"), quant=quant
+    )
+    assert recs[0].reasons == ["llm_error"] and recs[1].approved
+    assert len(read_recommendations(tmp_path / "l.jsonl")) == 2
+
+
+def test_unexpected_error_in_thesis_is_recorded(tmp_path):
+    def fetch(t):
+        if t == "NVDA":
+            raise ZeroDivisionError("bad data")
+        return rising_bars()
+
+    recs = _run(
+        tmp_path, lambda t: director_json("NVDA", "AMD"), fetch=fetch
+    )
+    assert recs[0].reasons == ["internal_error"] and recs[1].approved
+
+
+def test_duplicate_tickers_are_vetoed(tmp_path):
+    recs = _run(
+        tmp_path, lambda t: director_json("NVDA", "nvda", "NVDA ")
+    )
+    assert [r.ticker for r in recs] == ["NVDA"] * 3
+    assert recs[0].approved
+    assert recs[1].reasons == ["duplicate_ticker"]
+    assert recs[2].reasons == ["duplicate_ticker"]
+    assert recs[1].order is None

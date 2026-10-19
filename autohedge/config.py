@@ -2,6 +2,7 @@
 Runtime configuration: trading mode, model name and risk policy.
 """
 
+import math
 import os
 from dataclasses import dataclass, fields
 from typing import Literal
@@ -23,6 +24,27 @@ def get_mode() -> Literal["paper"]:
 def get_model_name() -> str:
     """Return the LLM model name used by the agents."""
     return os.getenv("AUTOHEDGE_MODEL", "gpt-4.1")
+
+
+# (low, high, low_inclusive); every value must also be finite.
+_BOUNDS = {
+    "equity_usd": (0, math.inf, False),
+    "min_conviction": (0, 1, True),
+    "min_probability_up": (0, 1, True),
+    "max_position_pct": (0, 1, False),
+    "risk_per_trade_pct": (0, 1, False),
+    "stop_atr_mult": (0, math.inf, False),
+    "take_profit_r": (0, math.inf, False),
+    "max_annual_vol": (0, math.inf, False),
+}
+
+
+def _check(name: str, field: str, value: float) -> float:
+    low, high, low_inclusive = _BOUNDS[field]
+    above = value >= low if low_inclusive else value > low
+    if not (math.isfinite(value) and above and value <= high):
+        raise ConfigError(f"{name}={value!r} is out of range")
+    return value
 
 
 @dataclass(frozen=True)
@@ -48,9 +70,10 @@ class RiskPolicy:
             if raw is None:
                 continue
             try:
-                values[f.name] = float(raw)
+                value = float(raw)
             except ValueError:
                 raise ConfigError(
                     f"{name} must be a number, got {raw!r}"
                 ) from None
+            values[f.name] = _check(name, f.name, value)
         return cls(**values)

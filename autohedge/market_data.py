@@ -41,7 +41,9 @@ def fetch_bars(ticker: str, period: str = "1y") -> list[Bar]:
         raise MarketDataError(f"{symbol}: download failed: {e}") from e
     if df is None or df.empty:
         raise MarketDataError(f"{symbol}: no price data")
-    df = df.dropna(subset=["Open", "High", "Low", "Close"])
+    ohlc = df[["Open", "High", "Low", "Close"]]
+    usable = ohlc.apply(lambda col: col.map(math.isfinite)).all(axis=1)
+    df = df[usable & (ohlc > 0).all(axis=1)]
     if df.empty:
         raise MarketDataError(f"{symbol}: no price data")
     bars = [
@@ -51,12 +53,20 @@ def fetch_bars(ticker: str, period: str = "1y") -> list[Bar]:
             high=float(row["High"]),
             low=float(row["Low"]),
             close=float(row["Close"]),
-            volume=float(row.get("Volume", 0) or 0),
+            volume=_volume(row.get("Volume")),
         )
         for ts, row in df.iterrows()
     ]
     logger.debug(f"{symbol}: {len(bars)} daily bars")
     return bars
+
+
+def _volume(raw) -> float:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+    return value if math.isfinite(value) else 0.0
 
 
 def _sma(values: list[float], n: int) -> float:
@@ -113,6 +123,14 @@ def build_snapshot(ticker: str, bars: list[Bar]) -> MarketSnapshot:
     if len(bars) < MIN_BARS:
         raise InsufficientHistoryError(
             f"{ticker}: {len(bars)} bars, need {MIN_BARS}"
+        )
+    if any(
+        not math.isfinite(v) or v <= 0
+        for b in bars
+        for v in (b.open, b.high, b.low, b.close)
+    ):
+        raise InsufficientHistoryError(
+            f"{ticker}: non-positive or non-finite prices"
         )
     closes = [b.close for b in bars]
     year = bars[-252:]
